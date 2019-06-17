@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-flake8 --config="${DIR}/../.flake8" "${DIR}/setup.py" "${DIR}/../datadog_operator.py"
+flake8 --config="${DIR}/../.flake8" "${DIR}/../datadog_operator.py"

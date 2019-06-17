@@ -1,10 +1,10 @@
 import copy
+import random
 from functools import wraps
 
 import kopf
 from datadog import initialize, api as datadog_api
-from kopf import HandlerRetryError
-from kopf.structs.status import get_retry_count
+from kopf import HandlerRetryError, HandlerFatalError
 
 initialize()
 # datadog_api._mute = False
@@ -15,11 +15,10 @@ KUBE_RESOURCE_ID_KEY = 'kube_resource_id'
 MONITOR_NOT_FOUND = 'Monitor not found'
 
 
-def exponential_backoff(delay=2, backoff=2, max_delay=300):
+def backoff(max_delay=600):
     """
-    Customizable exponential backoff strategy.
-    :param float delay: Initial (base) delay.
-    :param float backoff: base of the exponent to use for exponential backoff.
+    Customizable exponential backoff strategy. If used to decorate a kopf handler then any
+    `HandlerRetryErrors` that are thrown will grow exponentially in delay.
     :param int max_delay: If provided each delay generated is capped at this amount.
     :return
     """
@@ -29,16 +28,17 @@ def exponential_backoff(delay=2, backoff=2, max_delay=300):
             try:
                 return handler(*args, **kwargs)
             except HandlerRetryError as e:
-                # FIXME: `handler`, in this case, is just a callable. It doesn't have all of the
-                #  attrs that `get_retry_count` needs.
-                sleep = delay * backoff ** get_retry_count(body=kwargs['body'], handler=handler)
-                e.delay = sleep if max_delay is None else min(sleep, max_delay)
+                e.delay = jittered_backoff(kwargs.get('retry', 0), max_delay=max_delay)
                 raise
         return wrapper
     return deco
 
 
-@kopf.on.create('datadog.mzizzi', 'v1', 'monitors')
+def jittered_backoff(retry, max_delay=600, _random=random):
+    return _random.randint(0, min(max_delay, 2 ** retry))
+
+
+@kopf.on.create('datadog.mzizzi', 'v1', 'monitors', timeout=60*60*12)
 def on_create(spec, patch, uid, **kwargs):
     # TODO: should we further validate spec or let datadog kick back an error if things are off?
 
@@ -86,20 +86,14 @@ def on_update(status, spec, uid, **kwargs):
     return
 
 
-@kopf.on.delete('datadog.mzizzi', 'v1', 'monitors')
+@kopf.on.delete('datadog.mzizzi', 'v1', 'monitors', timeout=60*60*12)
+@backoff()
 def on_delete(status, patch, logger, **kwargs):
     monitor_id = status.get(MONITOR_ID_KEY, None)
 
     if not monitor_id:
-        # TODO: status field missing. Someone(thing?) modified the resource such that we can no
-        #  longer determine what monitor to update.
-        #    * complain via somehow via kube events / status?
-        #    * create a new monitor?
-        #    * search datadog for an alarm with a matching uid?
-        logger.debug(
-            f'Monitor resource missing "{MONITOR_ID_KEY}" key. Monitor may be orphaned '
-            'in DataDog.')
-        return
+        raise HandlerFatalError(
+            f'Resource status missing "{MONITOR_ID_KEY}" key. Monitor may be orphaned in DataDog.')
 
     response = datadog_api.Monitor.delete(monitor_id)
 
@@ -113,8 +107,6 @@ def on_delete(status, patch, logger, **kwargs):
         if MONITOR_NOT_FOUND in response['errors']:
             logger.debug(f'datadog monitor {monitor_id} already deleted')
             return
-
-        # TODO: exponential backoff
 
         # FIXME: This will flood events if backoff isn't aggressive:
         #  https://github.com/zalando-incubator/kopf/issues/117
