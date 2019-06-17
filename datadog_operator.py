@@ -1,8 +1,10 @@
 import copy
+from functools import wraps
 
 import kopf
 from datadog import initialize, api as datadog_api
 from kopf import HandlerRetryError
+from kopf.structs.status import get_retry_count
 
 initialize()
 # datadog_api._mute = False
@@ -11,6 +13,29 @@ MONITOR_ID_KEY = 'datadog_monitor_id'
 KUBE_RESOURCE_ID_KEY = 'kube_resource_id'
 
 MONITOR_NOT_FOUND = 'Monitor not found'
+
+
+def exponential_backoff(delay=2, backoff=2, max_delay=300):
+    """
+    Customizable exponential backoff strategy.
+    :param float delay: Initial (base) delay.
+    :param float backoff: base of the exponent to use for exponential backoff.
+    :param int max_delay: If provided each delay generated is capped at this amount.
+    :return
+    """
+    def deco(handler):
+        @wraps(handler)
+        def wrapper(*args, **kwargs):
+            try:
+                return handler(*args, **kwargs)
+            except HandlerRetryError as e:
+                # FIXME: `handler`, in this case, is just a callable. It doesn't have all of the
+                #  attrs that `get_retry_count` needs.
+                sleep = delay * backoff ** get_retry_count(body=kwargs['body'], handler=handler)
+                e.delay = sleep if max_delay is None else min(sleep, max_delay)
+                raise
+        return wrapper
+    return deco
 
 
 @kopf.on.create('datadog.mzizzi', 'v1', 'monitors')
@@ -84,9 +109,13 @@ def on_delete(status, patch, logger, **kwargs):
         #  datadog SDK only returns an error object. http status code would be more helpful in
         #  determining how to proceed. The best we cane do for now is to string compare bits and
         #  pieces of the response until we can get hands on the underlying status code.
+        #  GitHub issue: https://github.com/DataDog/datadogpy/issues/408
         if MONITOR_NOT_FOUND in response['errors']:
             logger.debug(f'datadog monitor {monitor_id} already deleted')
             return
 
         # TODO: exponential backoff
-        raise HandlerRetryError(errors=response['errors'])
+
+        # FIXME: This will flood events if backoff isn't aggressive:
+        #  https://github.com/zalando-incubator/kopf/issues/117
+        raise HandlerRetryError(response['errors'])
