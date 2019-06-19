@@ -10,104 +10,110 @@ initialize()
 # datadog_api._mute = False
 
 MONITOR_ID_KEY = 'datadog_monitor_id'
-KUBE_RESOURCE_ID_KEY = 'kube_resource_id'
+KUBE_RESOURCE_UID_TAG = 'kubernetes.resource.uid'
+KUBE_RESOURCE_NAME_TAG = 'kubernetes.resource.name'
+KUBE_NAMESPACE_TAG = 'kubernetes.namespace'
 
-MONITOR_NOT_FOUND = 'Monitor not found'
 
-
-def backoff(max_delay=600):
+def handler_wrapper(max_backoff_delay=600):
     """
-    Customizable exponential backoff strategy. If used to decorate a kopf handler then any
-    `HandlerRetryErrors` that are thrown will grow exponentially in delay.
-    :param int max_delay: If provided each delay generated is capped at this amount.
+    Handles exponential backoff for all Handlers if/when they throw `HandlerRetryErrors`.
+    Also adds `monitor_id` and `extra_tags` the wrapped handler.
+    :param int max_backoff_delay: If provided each delay generated is capped at this amount.
     :return
     """
     def deco(handler):
         @wraps(handler)
         def wrapper(*args, **kwargs):
             try:
-                return handler(*args, **kwargs)
+                tags = operator_managed_tags(kwargs['namespace'], kwargs['name'], kwargs['uid'])
+                monitor_id = kwargs['status'].get(MONITOR_ID_KEY, None) or query_monitor_id(tags)
+                return handler(*args, monitor_id=monitor_id, extra_tags=tags, **kwargs)
             except HandlerRetryError as e:
-                e.delay = jittered_backoff(kwargs.get('retry', 0), max_delay=max_delay)
+                e.delay = jittered_backoff(kwargs.get('retry', 0), max_backoff_delay)
                 raise
         return wrapper
     return deco
 
 
-def jittered_backoff(retry, max_delay=600, _random=random):
+def jittered_backoff(retry, max_delay, _random=random):
     return _random.randint(0, min(max_delay, 2 ** retry))
 
 
-@kopf.on.create('datadog.mzizzi', 'v1', 'monitors', timeout=60*60*12)
-def on_create(spec, patch, uid, **kwargs):
-    # TODO: should we further validate spec or let datadog kick back an error if things are off?
+def operator_managed_tags(namespace, name, uid):
+    """
+    List of tags used to query (potentially orphaned?) Monitors from DataDog.
+    :param namespace:
+    :param name:
+    :param uid:
+    :return:
+    """
+    return [
+        f'{KUBE_RESOURCE_UID_TAG}:{uid}',
+        f'{KUBE_NAMESPACE_TAG}:{namespace}',
+        f'{KUBE_RESOURCE_NAME_TAG}:{name}']
 
-    # Track the kubernetes resource id of this object as a tag on the monitor in datadog. Attempt
-    # to do this politely by making a copy of the dict.
+
+def query_monitor_id(tags):
+    """
+    Query DataDog to see if a monitor exists with the provided tags.
+    :param tags:
+    :return:
+    """
+    response = datadog_api.Monitor.search(query=' '.join(['tag:' + tag for tag in tags]))
+
+    if 'errors' in response and response['errors']:
+        raise HandlerRetryError(response['errors'])
+
+    monitors = response.get('monitors', [])
+    if monitors and len(monitors) > 0:
+        return monitors[0].get('id')
+
+
+def configure_monitor(spec, monitor_id, extra_tags):
+    """
+    Idempotent method for Configure
+    :param spec:
+    :param patch:
+    :param monitor_id:
+    :param extra_tags:
+    :return:
+    """
     request_body = copy.deepcopy(spec)
-    request_body.setdefault('tags', []).append(f'{KUBE_RESOURCE_ID_KEY}:{uid}')
+    request_body.setdefault('tags', []).extend(extra_tags)
 
-    response = datadog_api.Monitor.create(**request_body)
+    if monitor_id:
+        response = datadog_api.Monitor.update(monitor_id, **request_body)
+    else:
+        response = datadog_api.Monitor.create(**request_body)
 
-    # store the id of the datadog monitor in the kube resource's status field
-    patch.setdefault('status', {})[MONITOR_ID_KEY] = response['id']
+    if 'errors' in response and response['errors']:
+        raise HandlerRetryError(response['errors'])
+
+    return response
+
+
+@kopf.on.create('datadog.mzizzi', 'v1', 'monitors')
+@handler_wrapper()
+def on_create(spec, patch, monitor_id, extra_tags, **kwargs):
+    patch.setdefault('status', {})[MONITOR_ID_KEY] = \
+        configure_monitor(spec, monitor_id, extra_tags).get('id')
 
 
 @kopf.on.update('datadog.mzizzi', 'v1', 'monitors')
-def on_update(status, spec, uid, **kwargs):
-    # TODO: handle case where monitor doesn't exist. Either because status[MONITOR_ID_KEY] is
-    #  missing or the monitor itself is missing on the DataDog side.
+@handler_wrapper()
+def on_update(spec, patch, monitor_id, extra_tags, **kwargs):
+    patch.setdefault('status', {})[MONITOR_ID_KEY] = \
+        configure_monitor(spec, monitor_id, extra_tags).get('id')
 
-    # Track the kubernetes resource id of this object as a tag on the monitor in datadog. Attempt
-    # to do this politely by making a copy of the dict.
-    request_body = copy.deepcopy(spec)
-    request_body.setdefault('tags', []).append(f'{KUBE_RESOURCE_ID_KEY}:{uid}')
 
-    monitor_id = status.get(MONITOR_ID_KEY, None)
-
+@kopf.on.delete('datadog.mzizzi', 'v1', 'monitors')
+@handler_wrapper()
+def on_delete(monitor_id, **kwargs):
     if not monitor_id:
-        # TODO: status field missing. Someone(thing?) modified the resource such that we can no
-        #  longer determine what monitor to update.
-        #    * complain via somehow via kube events / status?
-        #    * create a new monitor?
-        #    * search datadog for an alarm with a matching uid?
-        pass
-
-    # update using the monitor id that's cached in this resource's status field
-    response = datadog_api.Monitor.update(status[MONITOR_ID_KEY], **request_body)
-
-    if 'errors' in response and response['errors']:
-        # TODO: fix the datadog SDK such that we know what type of error occurred. As of now we
-        #  don't know if the failure is "retryable" or if it's pointless to keep trying. The datadog
-        #  SDK only returns an error object. http status code would be more helpful in determining
-        #  how to proceed.
-        pass
-
-    return
-
-
-@kopf.on.delete('datadog.mzizzi', 'v1', 'monitors', timeout=60*60*12)
-@backoff()
-def on_delete(status, patch, logger, **kwargs):
-    monitor_id = status.get(MONITOR_ID_KEY, None)
-
-    if not monitor_id:
-        raise HandlerFatalError(
-            f'Resource status missing "{MONITOR_ID_KEY}" key. Monitor may be orphaned in DataDog.')
+        return
 
     response = datadog_api.Monitor.delete(monitor_id)
 
     if 'errors' in response and response['errors']:
-        # TODO: fix the datadog SDK such that we know what type of error occurred. As of now we
-        #  don't know if the failure is "retryable" or if it's pointless to keep trying. The
-        #  datadog SDK only returns an error object. http status code would be more helpful in
-        #  determining how to proceed. The best we cane do for now is to string compare bits and
-        #  pieces of the response until we can get hands on the underlying status code.
-        #  GitHub issue: https://github.com/DataDog/datadogpy/issues/408
-        if MONITOR_NOT_FOUND in response['errors']:
-            logger.debug(f'datadog monitor {monitor_id} already deleted')
-            return
-
-        # FIXME: This will flood events if backoff isn't aggressive:
-        #  https://github.com/zalando-incubator/kopf/issues/117
         raise HandlerRetryError(response['errors'])
