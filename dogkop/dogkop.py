@@ -4,15 +4,16 @@ from functools import wraps
 
 import kopf
 from datadog import initialize, api as datadog_api
-from kopf import HandlerRetryError, HandlerFatalError
+from kopf import HandlerRetryError
 
 initialize()
-# datadog_api._mute = False
 
 MONITOR_ID_KEY = 'datadog_monitor_id'
 KUBE_RESOURCE_UID_TAG = 'kubernetes.resource.uid'
 KUBE_RESOURCE_NAME_TAG = 'kubernetes.resource.name'
 KUBE_NAMESPACE_TAG = 'kubernetes.namespace'
+
+MONITOR_NOT_FOUND = 'Monitor not found'
 
 
 def handler_wrapper(max_backoff_delay=600):
@@ -37,9 +38,15 @@ def handler_wrapper(max_backoff_delay=600):
             try:
                 tags = operator_managed_tags(kwargs['namespace'], kwargs['name'], kwargs['uid'])
 
-                # FIXME: Handle invalid status[MONITOR_ID_KEY] key. e.g. DataDog monitor was
-                #  deleted out of band and no longer exists.
-                monitor_id = kwargs['status'].get(MONITOR_ID_KEY, None) or query_monitor_id(tags)
+                monitor_id = kwargs['status'].get(MONITOR_ID_KEY, None)
+                if monitor_id:
+                    res = datadog_api.Monitor.get(monitor_id)
+                    if 'errors' in res and res['errors'] and MONITOR_NOT_FOUND in res['errors']:
+                        monitor_id = query_monitor_id(tags)
+                        kwargs['patch'].setdefault('status', {})[MONITOR_ID_KEY] = monitor_id
+                    else:
+                        # Failed to fetch the alarm with an error other than 404. Retry indefinitely
+                        raise HandlerRetryError(res['errors'])
 
                 return handler(*args, monitor_id=monitor_id, extra_tags=tags, **kwargs)
             except HandlerRetryError as e:
