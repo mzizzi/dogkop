@@ -19,15 +19,28 @@ def handler_wrapper(max_backoff_delay=600):
     """
     Handles exponential backoff for all Handlers if/when they throw `HandlerRetryErrors`.
     Also adds `monitor_id` and `extra_tags` the wrapped handler.
+
+    Adds `monitor_id` kwarg to each handler. Each of the Handlers in this module share behavior
+    in that they must determine whether or not the corresponding datadog monitor already exists
+    or not. The cached monitor id stored in `status[MONITOR_ID_KEY]` is the preferred method of
+    "rediscovering" the DataDog monitor. Otherwise we attempt to rediscover it with a datadog query
+    that searches monitors via tag matching.
+
+    `extra_tags` is a set of operator managed tags that can be used to uniquely identify a Monitor.
+
     :param int max_backoff_delay: If provided each delay generated is capped at this amount.
-    :return
+    :return:
     """
     def deco(handler):
         @wraps(handler)
         def wrapper(*args, **kwargs):
             try:
                 tags = operator_managed_tags(kwargs['namespace'], kwargs['name'], kwargs['uid'])
+
+                # FIXME: Handle invalid status[MONITOR_ID_KEY] key. e.g. DataDog monitor was
+                #  deleted out of band and no longer exists.
                 monitor_id = kwargs['status'].get(MONITOR_ID_KEY, None) or query_monitor_id(tags)
+
                 return handler(*args, monitor_id=monitor_id, extra_tags=tags, **kwargs)
             except HandlerRetryError as e:
                 e.delay = jittered_backoff(kwargs.get('retry', 0), max_backoff_delay)
@@ -41,13 +54,7 @@ def jittered_backoff(retry, max_delay, _random=random):
 
 
 def operator_managed_tags(namespace, name, uid):
-    """
-    List of tags used to query (potentially orphaned?) Monitors from DataDog.
-    :param namespace:
-    :param name:
-    :param uid:
-    :return:
-    """
+    """ List of tags used to query (potentially orphaned?) Monitors from DataDog."""
     return [
         f'{KUBE_RESOURCE_UID_TAG}:{uid}',
         f'{KUBE_NAMESPACE_TAG}:{namespace}',
@@ -57,8 +64,8 @@ def operator_managed_tags(namespace, name, uid):
 def query_monitor_id(tags):
     """
     Query DataDog to see if a monitor exists with the provided tags.
-    :param tags:
-    :return:
+    :param list[str] tags: List of tags used to query DataDog for a monitor.
+    :return int: ID of DataDog monitor. None if no Monitor is found.
     """
     response = datadog_api.Monitor.search(query=' '.join(['tag:' + tag for tag in tags]))
 
@@ -70,22 +77,20 @@ def query_monitor_id(tags):
         return monitors[0].get('id')
 
 
-def configure_monitor(spec, monitor_id, extra_tags):
+def configure_monitor(monitor_config, monitor_id=None):
     """
-    Idempotent method for Configure
-    :param spec:
-    :param patch:
-    :param monitor_id:
-    :param extra_tags:
-    :return:
+    Idempotent method for configuring DataDog monitors.
+    :param monitor_config: Ends up being json serialized and passed to DataDog apis for create
+     or update.
+     https://docs.datadoghq.com/api/?lang=python#create-a-monitor
+     https://docs.datadoghq.com/api/?lang=python#edit-a-monitor
+    :param monitor_id: Optional id of existing DataDog monitor.
+    :return dict: Response from DataDog API.
     """
-    request_body = copy.deepcopy(spec)
-    request_body.setdefault('tags', []).extend(extra_tags)
-
     if monitor_id:
-        response = datadog_api.Monitor.update(monitor_id, **request_body)
+        response = datadog_api.Monitor.update(monitor_id, **monitor_config)
     else:
-        response = datadog_api.Monitor.create(**request_body)
+        response = datadog_api.Monitor.create(**monitor_config)
 
     if 'errors' in response and response['errors']:
         raise HandlerRetryError(response['errors'])
@@ -96,15 +101,25 @@ def configure_monitor(spec, monitor_id, extra_tags):
 @kopf.on.create('datadog.mzizzi', 'v1', 'monitors')
 @handler_wrapper()
 def on_create(spec, patch, monitor_id, extra_tags, **kwargs):
+    # Changes to `spec` end up being persisted. We're modifying it to be used as a request body so
+    # we should work off of a copy.
+    monitor_config = copy.deepcopy(spec)
+    monitor_config.setdefault('tags', []).extend(extra_tags)
+
     patch.setdefault('status', {})[MONITOR_ID_KEY] = \
-        configure_monitor(spec, monitor_id, extra_tags).get('id')
+        configure_monitor(monitor_config, monitor_id).get('id')
 
 
 @kopf.on.update('datadog.mzizzi', 'v1', 'monitors')
 @handler_wrapper()
 def on_update(spec, patch, monitor_id, extra_tags, **kwargs):
+    # Changes to `spec` end up being persisted. We're modifying it to be used as a request body so
+    # we should work off of a copy.
+    monitor_config = copy.deepcopy(spec)
+    monitor_config.setdefault('tags', []).extend(extra_tags)
+
     patch.setdefault('status', {})[MONITOR_ID_KEY] = \
-        configure_monitor(spec, monitor_id, extra_tags).get('id')
+        configure_monitor(monitor_config, monitor_id).get('id')
 
 
 @kopf.on.delete('datadog.mzizzi', 'v1', 'monitors')
