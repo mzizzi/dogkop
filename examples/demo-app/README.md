@@ -1,0 +1,1 @@
+Assumes namespace `myproject` for the demo app.

@@ -1,0 +1,82 @@
+---
+# Deploy an example app: https://github.com/brancz/prometheus-example-app/blob/master/main.go
+kind: Template
+apiVersion: v1
+parameters:
+  - name: NAMESPACE
+    value: myproject
+
+objects:
+  - kind: Route
+    apiVersion: v1
+    metadata:
+      name: webserver
+    spec:
+      to:
+        kind: Service
+        name: webserver
+        weight: 100
+      wildcardPolicy: None
+
+  - kind: "Service"
+    apiVersion: v1
+    metadata:
+      name: webserver
+    spec:
+      type: ClusterIP
+      ports:
+        - name: http
+          port: 80
+          targetPort: 8080
+          protocol: TCP
+      selector:
+        app: webserver
+
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: webserver
+    spec:
+      selector:
+        matchLabels:
+          app: webserver
+      replicas: 1
+      template:
+        metadata:
+          labels:
+            app: webserver
+          annotations:
+            ad.datadoghq.com/webserver.check_names: '["prometheus"]'
+            ad.datadoghq.com/webserver.init_configs: '[{}]'
+            ad.datadoghq.com/webserver.instances: '[{"prometheus_url": "http://%%host%%:8080/metrics","namespace": "myproject","metrics": ["http_requests_total"],"type_overrides": {"http_requests_total": "counter"}}]'
+        spec:
+          containers:
+            - name: webserver
+              image: quay.io/brancz/prometheus-example-app:v0.1.0
+              ports:
+                - containerPort: 8080
+
+  - apiVersion: datadog.mzizzi/v1
+    kind: Monitor
+    metadata:
+      name: my-monitor
+    spec:
+      name: Low requests monitor
+      type: metric alert
+      query: sum(last_1m):avg:myproject.http_requests_total{*}.as_count() < 1
+      message: Our demo app isn't getting requests!
+      tags: []
+      options:
+        notify_audit: false
+        locked: false
+        timeout_h: 0
+        new_host_delay: 300
+        require_full_window: false
+        notify_no_data: true
+        renotify_interval: '0'
+        escalation_message: ''
+        no_data_timeframe: 5
+        include_tags: true
+        thresholds:
+          critical: 1
+          warning: 5

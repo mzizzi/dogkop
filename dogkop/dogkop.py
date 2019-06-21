@@ -44,9 +44,11 @@ def handler_wrapper(max_backoff_delay=600):
                     if 'errors' in res and res['errors'] and MONITOR_NOT_FOUND in res['errors']:
                         monitor_id = query_monitor_id(tags)
                         kwargs['patch'].setdefault('status', {})[MONITOR_ID_KEY] = monitor_id
-                    else:
-                        # Failed to fetch the alarm with an error other than 404. Retry indefinitely
-                        raise HandlerRetryError(res['errors'])
+                        if not monitor_id:
+                            raise HandlerRetryError(res['errors'])
+                    elif 'errors' in res and res['errors']:
+                        # Failed to fetch the alarm with an error other than 404
+                        HandlerRetryError(res['errors'])
 
                 return handler(*args, monitor_id=monitor_id, extra_tags=tags, **kwargs)
             except HandlerRetryError as e:
@@ -61,7 +63,7 @@ def jittered_backoff(retry, max_delay, _random=random):
 
 
 def operator_managed_tags(namespace, name, uid):
-    """ List of tags used to query (potentially orphaned?) Monitors from DataDog."""
+    """List of tags used to query (potentially orphaned?) Monitors from DataDog."""
     return [
         f'{KUBE_RESOURCE_UID_TAG}:{uid}',
         f'{KUBE_NAMESPACE_TAG}:{namespace}',
