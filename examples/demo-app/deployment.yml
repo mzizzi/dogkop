@@ -48,7 +48,7 @@ objects:
           annotations:
             ad.datadoghq.com/webserver.check_names: '["prometheus"]'
             ad.datadoghq.com/webserver.init_configs: '[{}]'
-            ad.datadoghq.com/webserver.instances: '[{"prometheus_url": "http://%%host%%:8080/metrics","namespace": "myproject","metrics": ["http_requests_total"],"type_overrides": {"http_requests_total": "counter"}}]'
+            ad.datadoghq.com/webserver.instances: '[{"prometheus_url": "http://%%host%%:8080/metrics","namespace": "${NAMESPACE}","metrics": ["http_requests_total"],"type_overrides": {"http_requests_total": "counter"}}]'
         spec:
           containers:
             - name: webserver
@@ -63,7 +63,7 @@ objects:
     spec:
       name: Low requests monitor
       type: metric alert
-      query: sum(last_1m):avg:myproject.http_requests_total{*}.as_count() < 1
+      query: sum(last_1m):avg:${NAMESPACE}.http_requests_total{*}.as_count() < 1
       message: Our demo app isn't getting requests!
       tags: []
       options:

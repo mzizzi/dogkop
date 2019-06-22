@@ -23,9 +23,7 @@ def handler_wrapper(max_backoff_delay=600):
 
     Adds `monitor_id` kwarg to each handler. Each of the Handlers in this module share behavior
     in that they must determine whether or not the corresponding datadog monitor already exists
-    or not. The cached monitor id stored in `status[MONITOR_ID_KEY]` is the preferred method of
-    "rediscovering" the DataDog monitor. Otherwise we attempt to rediscover it with a datadog query
-    that searches monitors via tag matching.
+    or not. Monitor state is re-discovered with a datadog query that searches monitors by tags.
 
     `extra_tags` is a set of operator managed tags that can be used to uniquely identify a Monitor.
 
@@ -37,18 +35,8 @@ def handler_wrapper(max_backoff_delay=600):
         def wrapper(*args, **kwargs):
             try:
                 tags = operator_managed_tags(kwargs['namespace'], kwargs['name'], kwargs['uid'])
-
-                monitor_id = kwargs['status'].get(MONITOR_ID_KEY, None)
-                if monitor_id:
-                    res = datadog_api.Monitor.get(monitor_id)
-                    if 'errors' in res and res['errors'] and MONITOR_NOT_FOUND in res['errors']:
-                        monitor_id = query_monitor_id(tags)
-                        kwargs['patch'].setdefault('status', {})[MONITOR_ID_KEY] = monitor_id
-                        if not monitor_id:
-                            raise HandlerRetryError(res['errors'])
-                    elif 'errors' in res and res['errors']:
-                        # Failed to fetch the alarm with an error other than 404
-                        HandlerRetryError(res['errors'])
+                monitor_id = query_monitor_id(tags)
+                kwargs['patch'].setdefault('status', {})[MONITOR_ID_KEY] = monitor_id
 
                 return handler(*args, monitor_id=monitor_id, extra_tags=tags, **kwargs)
             except HandlerRetryError as e:

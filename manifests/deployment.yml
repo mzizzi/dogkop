@@ -1,0 +1,35 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dogkop
+  namespace: dogkop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      application: dogkop
+  template:
+    metadata:
+      labels:
+        application: dogkop
+    spec:
+      serviceAccountName: dogkop
+      containers:
+        - name: dogkop
+          image: mzizzi/dogkop
+          env:
+            - name: POD_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DATADOG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: datadog-secrets
+                  key: api-key
+            - name: DATADOG_APP_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: datadog-secrets
+                  key: app-key
