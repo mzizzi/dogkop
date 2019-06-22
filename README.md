@@ -1,35 +1,50 @@
 # DataDog Operator
 
-Manage [DataDog](https://www.datadoghq.com/) resources from within Kubernetes. Currently only
-supports DataDog Monitors.
+Manage [DataDog](https://www.datadoghq.com/) Monitor resources from within Kubernetes.
 
-**Warning:** The code is littered with TODOs and should be considered for demonstration purposes
-only. There are a lot of edge cases that aren't accounted for that will lead to endless event
-processing loops in your cluster and orphaned resources in your DataDog account.
+To be able to make the most of Kubernetes, you need a set of cohesive APIs to extend in order to
+service and manage your applications. dogkop brings the management of DataDog Monitor resources
+into Kubernetes. Deploying Monitoring resources is no longer an afterthought as they can be
+defined using the same templates that define the your application.
 
-Built using [Kubernetes Operator Pythonic Framework](https://github.com/zalando-incubator/kopf)
+These CRDs, coupled with DataDog's Kubernetes node agent and prometheus autodiscovery, provide
+seamless management of both application and infrastructure metrics for your services.
 
-## Custom Resource Definitions
+**Disclaimer:** The code is littered with TODOs and should be considered for demonstration purposes
+only.
 
-To install the CRD:
-```bash
-oc apply -f monitor-crd.yml
-```
+Built using the [Kubernetes Operator Pythonic Framework](https://github.com/zalando-incubator/kopf)
 
-To remove the CRD:
-```bash
-oc delete crd monitors.datadog.mzizzi
-oc delete -f monitor-crd.yml
+## Introduction
+
+Provisioning the same Monitor that DataDog's [Create a monitor](https://docs.datadoghq.com/api/?lang=python#create-a-monitor)
+API docs describe using a Kubernetes custom resource.
+
+```yaml
+apiVersion: datadog.mzizzi/v1
+kind: Monitor
+metadata:
+  name: my-monitor
+spec:
+  type: metric alert
+  query: avg(last_5m):sum:system.net.bytes_rcvd{host:host0} > 100
+  name: Bytes received on host0
+  message: We may need to add web hosts if this is consistently high.
+  tags:
+    - foo:bar
+  options:
+    notify_no_data: True,
+    no_data_timeframe: 20
 ```
 
 ## Running the Operator
 
 You'll need DataDog creds. You can get them [here](https://www.datadoghq.com/free-datadog-trial/).
 You can skip setting up an agent for now. (Even though the signup process makes it seem required.)
-
-### Locally
+These to run dogkop in dev mode:
 
 ```bash
+oc apply -f manifests/monitor-crd.yml
 export DATADOG_API_KEY=$myDatadogApiKey
 export DATADOG_APP_KEY=$myDatadogAppKey
 python3.7 -m venv venv
@@ -38,7 +53,10 @@ pip install -r requirements.txt
 kopf run datadog_operator.py
 ```
 
-## Proof of Concept
+See [manifests](manifests/) for information for installing the Operator as a
+Kubernetes deployment.
+
+## Tutorial
 
 Assumes you're running minishift, the CRD is installed, and the operator is running.
 
