@@ -74,16 +74,13 @@ def query_monitor_id(tags):
         return monitors[0].get('id')
 
 
-def configure_monitor(monitor_config, monitor_id=None):
-    """
-    Idempotent method for configuring DataDog monitors.
-    :param monitor_config: Ends up being json serialized and passed to DataDog apis for create
-     or update.
-     https://docs.datadoghq.com/api/?lang=python#create-a-monitor
-     https://docs.datadoghq.com/api/?lang=python#edit-a-monitor
-    :param monitor_id: Optional id of existing DataDog monitor.
-    :return dict: Response from DataDog API.
-    """
+def create_update_handler(spec, patch, monitor_id, extra_tags):
+    """Handler for idempotent configuration of DataDog monitors."""
+    # Changes to `spec` end up being persisted. We're modifying it to be used as a request body so
+    # we should work off of a copy.
+    monitor_config = copy.deepcopy(spec)
+    monitor_config.setdefault('tags', []).extend(extra_tags)
+
     if monitor_id:
         response = datadog_api.Monitor.update(monitor_id, **monitor_config)
     else:
@@ -92,31 +89,19 @@ def configure_monitor(monitor_config, monitor_id=None):
     if 'errors' in response and response['errors']:
         raise HandlerRetryError(response['errors'])
 
-    return response
+    patch.setdefault('status', {})[MONITOR_ID_KEY] = response.get('id')
 
 
 @kopf.on.create('datadog.mzizzi', 'v1', 'monitors')
 @handler_wrapper()
 def on_create(spec, patch, monitor_id, extra_tags, **kwargs):
-    # Changes to `spec` end up being persisted. We're modifying it to be used as a request body so
-    # we should work off of a copy.
-    monitor_config = copy.deepcopy(spec)
-    monitor_config.setdefault('tags', []).extend(extra_tags)
-
-    patch.setdefault('status', {})[MONITOR_ID_KEY] = \
-        configure_monitor(monitor_config, monitor_id).get('id')
+    return create_update_handler(spec, patch, monitor_id, extra_tags)
 
 
 @kopf.on.update('datadog.mzizzi', 'v1', 'monitors')
 @handler_wrapper()
 def on_update(spec, patch, monitor_id, extra_tags, **kwargs):
-    # Changes to `spec` end up being persisted. We're modifying it to be used as a request body so
-    # we should work off of a copy.
-    monitor_config = copy.deepcopy(spec)
-    monitor_config.setdefault('tags', []).extend(extra_tags)
-
-    patch.setdefault('status', {})[MONITOR_ID_KEY] = \
-        configure_monitor(monitor_config, monitor_id).get('id')
+    return create_update_handler(spec, patch, monitor_id, extra_tags)
 
 
 @kopf.on.delete('datadog.mzizzi', 'v1', 'monitors')
