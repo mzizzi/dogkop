@@ -1,9 +1,10 @@
 import copy
 import random
 from functools import wraps
+from typing import List
 
 import kopf
-from datadog import initialize, api as datadog_api
+from datadog import initialize, api
 from kopf import HandlerRetryError
 
 initialize()
@@ -34,23 +35,26 @@ def handler_wrapper(max_backoff_delay=600):
         @wraps(handler)
         def wrapper(*args, **kwargs):
             try:
-                tags = operator_managed_tags(kwargs['namespace'], kwargs['name'], kwargs['uid'])
-                monitor_id = query_monitor_id(tags)
+                tags = operator_managed_tags(
+                    namespace=kwargs['namespace'],
+                    name=kwargs['name'],
+                    uid=kwargs['uid'])
+                monitor_id = query_monitor_by_tags(tags)
                 kwargs['patch'].setdefault('status', {})[MONITOR_ID_KEY] = monitor_id
 
                 return handler(*args, monitor_id=monitor_id, extra_tags=tags, **kwargs)
             except HandlerRetryError as e:
-                e.delay = jittered_backoff(kwargs.get('retry', 0), max_backoff_delay)
+                e.delay = jittered_backoff_delay(kwargs.get('retry', 0), max_backoff_delay)
                 raise
         return wrapper
     return deco
 
 
-def jittered_backoff(retry, max_delay, _random=random):
+def jittered_backoff_delay(retry, max_delay, _random=random):
     return _random.randint(0, min(max_delay, 2 ** retry))
 
 
-def operator_managed_tags(namespace, name, uid):
+def operator_managed_tags(*, namespace, name, uid) -> List[str]:
     """List of tags used to query (potentially orphaned?) Monitors from DataDog."""
     return [
         f'{KUBE_RESOURCE_UID_TAG}:{uid}',
@@ -58,13 +62,13 @@ def operator_managed_tags(namespace, name, uid):
         f'{KUBE_RESOURCE_NAME_TAG}:{name}']
 
 
-def query_monitor_id(tags):
+def query_monitor_by_tags(tags: List[str]) -> int:
     """
     Query DataDog to see if a monitor exists with the provided tags.
     :param list[str] tags: List of tags used to query DataDog for a monitor.
     :return int: ID of DataDog monitor. None if no Monitor is found.
     """
-    response = datadog_api.Monitor.search(query=' '.join(['tag:' + tag for tag in tags]))
+    response = api.Monitor.search(query=' '.join(['tag:' + tag for tag in tags]))
 
     if 'errors' in response and response['errors']:
         raise HandlerRetryError(response['errors'])
@@ -82,9 +86,9 @@ def create_update_handler(spec, patch, monitor_id, extra_tags):
     monitor_config.setdefault('tags', []).extend(extra_tags)
 
     if monitor_id:
-        response = datadog_api.Monitor.update(monitor_id, **monitor_config)
+        response = api.Monitor.update(monitor_id, **monitor_config)
     else:
-        response = datadog_api.Monitor.create(**monitor_config)
+        response = api.Monitor.create(**monitor_config)
 
     if 'errors' in response and response['errors']:
         raise HandlerRetryError(response['errors'])
@@ -110,7 +114,7 @@ def on_delete(monitor_id, **kwargs):
     if not monitor_id:
         return
 
-    response = datadog_api.Monitor.delete(monitor_id)
+    response = api.Monitor.delete(monitor_id)
 
     if 'errors' in response and response['errors']:
         raise HandlerRetryError(response['errors'])

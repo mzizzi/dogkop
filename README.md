@@ -107,5 +107,14 @@ dog monitor show $(oc get mon my-monitor -o json | jq .status.datadog_monitor_id
 Delete the monitor from kubernetes and ensure that it's deleted in DataDog:
 ```bash
 oc delete mon my-monitor
-dog monitor show_all --monitor_tags=kube_resource_id:62ad94bf-8fbf-11e9-a09c-5254007ee77c
+dog monitor show_
+all --monitor_tags=kube_resource_id:62ad94bf-8fbf-11e9-a09c-5254007ee77c
+```
+
+## Testing
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-test.txt
+python -m pytest tests
 ```
