@@ -1,3 +1,4 @@
+import json
 import math
 from unittest.mock import patch
 
@@ -50,3 +51,35 @@ def test_query_monitor_by_tags_error():
     with pytest.raises(HandlerRetryError), patch('dogkop.dogkop.api') as api_mock:
         api_mock.Monitor.search.return_value = {'errors': ['error']}
         query_monitor_by_tags([])
+
+
+def test_create_update_handler_for_create():
+    patch_arg = {}
+    spec_arg = {'baz': 'qux'}
+    extra_tags_arg = ['foo', 'bar']
+    response = {'id': 123}
+
+    original_spec = copy.deepcopy(spec_arg)
+
+    with patch('dogkop.dogkop.api') as api_mock:
+        api_mock.Monitor.create.return_value = response
+        create_update_handler({}, patch_arg, None, extra_tags_arg)
+
+    # check that extra tags were added to spec
+    _, create_kwargs = api_mock.Monitor.create.call_args
+    for tag in extra_tags_arg:
+        assert tag in create_kwargs['tags']
+
+    # hacky dict equality check to ensure that spec hasn't been modified
+    assert json.dumps(original_spec, sort_keys=True) == json.dumps(spec_arg, sort_keys=True)
+
+    # ensure that patch args has been updated with new alarm's id
+    assert patch_arg['status'][MONITOR_ID_KEY] == response['id']
+
+
+def test_create_update_handler_for_update():
+    with patch('dogkop.dogkop.api') as api_mock:
+        api_mock.Monitor.update.return_value = {}
+        create_update_handler({}, {}, 123, [])
+
+    api_mock.Monitor.update.assert_called_once()
